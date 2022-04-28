@@ -1,0 +1,15 @@
+{
+    "environment": "qa",
+    "region": "us-east-1",
+    "MaxSize": "2",
+    "MinSize": "1",
+    "DesiredCapacity": "1",
+    "action": "up",
+    "MaxSizeQa": "18",
+    "MinSizeQa": "9",
+    "DesiredCapacityQa": "9",
+    "MaxSizeUat": "10",
+    "MinSizeUat": "10",
+    "DesiredCapacityUat": "10",
+    "Weekends": "No or Yes" 
+  }

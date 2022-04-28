@@ -1,0 +1,44 @@
+apiVersion: batch/v1beta1
+kind: CronJob
+metadata:
+  name: ldap-backup
+spec:
+  schedule: "0 0 * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 5
+      template:
+        spec:
+          containers:
+            - name: ldap-backup
+              image: bitnami/openldap
+              volumeMounts:
+                - name: main
+                  mountPath: /backups/ldap/
+                  subPath: "ldap"
+              command: ["/bin/bash"]
+              args:
+                - -c
+                - >-
+                 touch /backups/ldap/ldapbk.sh && 
+                 chmod 775 /backups/ldap/* && 
+                 echo "#!/bin/sh" > /backups/ldap/ldapbk.sh && 
+                 echo 'ldapsearch -x -b "" -H ldap://openldap:389 -D """ -w '$LDAPassword' "(objectclass=*)" > /backups/ldap/ldap-backup-$(date +%Y-%m-%d).ldif' > /backups/ldap/ldapbk.sh &&
+                 /backups/ldap/ldapbk.sh &&
+                 rm /backups/ldap/ldapbk.sh
+              env:
+                - name: LDAPassword
+                  valueFrom: 
+                    secretKeyRef:
+                      name: ldap-admin-password
+                      key: password
+          restartPolicy: OnFailure    
+          volumes:
+            - name: main
+              persistentVolumeClaim:
+                readOnly: false
+                claimName: main    
+
+                

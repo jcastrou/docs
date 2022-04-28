@@ -1,0 +1,829 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+  
+    "Description": "CloudFormation template for Grafana service",
+  
+    "Parameters": {
+      "KeyName": {
+        "Description": "Name of an existing EC2 KeyPair to enable access to the instance",
+        "Type": "AWS::EC2::KeyPair::KeyName",
+        "Default": "env-prod",
+        "ConstraintDescription": "must be the name of an existing EC2 KeyPair."
+      },
+      "Environment": {
+        "Description": "Name of environment to deploy to",
+        "Type": "String",
+        "Default": "production",
+        "AllowedValues": ["production"]
+      },
+      "Domain": {
+        "Description": "Domain this stack belongs to",
+        "Type": "String",
+        "Default": "env"
+      }
+    },
+    "Mappings": {
+      "GlobalMap": {
+        "InstType": {
+          "production": "t3a.medium"
+        },
+        "InstTypeInflux": {
+          "production": "t3a.medium"
+        },
+        "ASGMinSize": {
+          "production": "1"
+        },
+        "ASGMaxSize": {
+          "production": "1"
+        },
+        "MinimumHealthy": {
+          "production": "100"
+        }
+      },
+      "InstanceAMI": {
+        "us-east-1": {
+          "production": "AMI"
+        }
+      },
+      "SecurityGroups": {
+        "us-east-1": {
+          "production":  "AMI"
+        }
+      },
+      "VPCSubnets": {
+        "us-east-1": {
+          "production": [
+            "subnet"
+          ]
+        }
+      },
+      "VPCmap":{
+        "us-east-1" : {"vpc":"vpc"}
+      }
+    },
+    "Conditions": {
+      "InProduction": { "Fn::Equals": [{ "Ref": "Environment" }, "production"] }
+    },
+    "Resources": {
+      "GrafanaSecurityGroup" : {
+        "Type" : "AWS::EC2::SecurityGroup",
+        "Properties" : {
+          "GroupDescription" : "Allow ports to Grafana",
+          "VpcId" : {"Fn::FindInMap": ["VPCmap",
+            { "Ref" : "AWS::Region" },"vpc"]},
+            "SecurityGroupIngress": [
+                {
+                  "IpProtocol": "-1",
+                  "FromPort": "-1",
+                  "ToPort": "-1",
+                  "SourceSecurityGroupId": "sg"
+                },
+                {
+                  "IpProtocol": "-1",
+                  "FromPort": "-1",
+                  "ToPort": "-1",
+                  "SourceSecurityGroupId": "sg"
+                }
+              ],
+              "Tags": [
+                {"Key": "Name","Value": "Grafana-SG-production"},
+                { "Key": "Environment", "Value": { "Ref": "Environment" } },
+                { "Key": "Service", "Value": "Grafana" },
+                { "Key": "Department", "Value": "DevOps" },
+                { "Key": "Owner", "Value": "DevOps" },
+                { "Key": "Application", "Value": "Monitoring" }
+              ]
+            }
+      },
+      "GrafanaRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": ["ec2.amazonaws.com"]
+                },
+                "Action": ["sts:AssumeRole"]
+              }
+            ]
+          },
+          "Policies": [
+            {
+              "PolicyName": "root",
+              "PolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                        "logs:*",
+                        "ec2:*",
+                        "s3:*",
+                        "ecr:*",
+                        "cloudwatch:*",
+                        "lambda:CreateFunction",
+                        "lambda:ListFunctions",
+                        "lambda:DeleteFunction",
+                        "autoscaling:*",
+                        "ecs:*",
+                        "apigateway:*"
+                    ],
+                    "Resource": ["*"]
+                  }
+                ]
+              }
+            }
+          ],
+          "Tags": [
+            {"Key": "Name","Value": "Grafana-Role-production"},
+            { "Key": "Environment", "Value": { "Ref": "Environment" } },
+            { "Key": "Service", "Value": "Grafana" },
+            { "Key": "Department", "Value": "DevOps" },
+            { "Key": "Owner", "Value": "DevOps" },
+            { "Key": "Application", "Value": "Monitoring" }
+          ]
+        }
+      },
+      "GrafanaInstanceProfile": {
+        "Type": "AWS::IAM::InstanceProfile",
+        "Properties": {
+          "Roles": [{ "Ref": "GrafanaRole" }]
+        }
+      },
+      "GrafanaLaunchConfig": {
+        "Type": "AWS::AutoScaling::LaunchConfiguration",
+        "Metadata": {
+          "Comment": "Install and configure Grafana",
+          "AWS::CloudFormation::Init": {
+            "configSets": {
+              "Grafana": ["preInstall"]
+            },
+            "preInstall": {
+              "commands": {
+                "01_update_instance": {
+                  "command": "yum update -y"
+                },
+                "02_download_and_install_docker": {
+                  "command": "sudo amazon-linux-extras install docker && sudo usermod -a -G docker ec2-user && sudo systemctl start docker"
+                },
+                "03_download_and_install_telegraf": {
+                  "command": "wget https://dl.influxdata.com/telegraf/releases/telegraf-1.18.3-1.x86_64.rpm && sudo yum localinstall telegraf-1.18.3-1.x86_64.rpm -y && sudo systemctl start telegraf" 
+                },
+                "04_create_folders": {
+                  "command": "sudo mkdir /media/storage && sudo mkdir /media/storage/logs && sudo mkdir /media/storage/config && sudo mkdir /media/storage/data && sudo touch /media/storage/config/grafana.ini  && chmod 777 -R /media/"
+                },
+                "05_start_grafana_container": {
+                    "command": "docker run -d -p 80:3000 --volume '/media/storage/config:/etc/grafana' --volume '/media/storage/logs:/var/log/grafana' --volume '/media/storage/data:/var/lib/grafana' grafana/grafana:7.5.7-ubuntu"
+                  },
+                "06_start_docker_and_telegraf": {
+                  "command": "aws s3 cp s3://devops-env/config/telegraf/telegraf.conf.grafana /etc/telegraf/telegraf.conf && systemctl restart telegraf"
+                }
+              } 
+            }
+          }
+        },
+        "Properties": {
+          "KeyName": { "Ref": "KeyName" },
+          "ImageId": {
+            "Fn::FindInMap": [
+              "InstanceAMI",
+              { "Ref": "AWS::Region" },
+              { "Ref": "Environment" }
+            ]
+          },
+          "SecurityGroups": [
+            {
+              "Fn::FindInMap": [
+                "SecurityGroups",
+                { "Ref": "AWS::Region" },
+                { "Ref": "Environment" }
+              ]
+            },
+             {"Ref" : "GrafanaSecurityGroup"}
+          ],
+          "InstanceType": {
+            "Fn::FindInMap": ["GlobalMap", "InstType", { "Ref": "Environment" }]
+          },
+          "UserData": {
+            "Fn::Base64": {
+              "Fn::Join": [
+                "",
+                [
+                  "#!/bin/bash -xe\n",
+                  "/opt/aws/bin/cfn-init -v ",
+                  "         --stack ",
+                  { "Ref": "AWS::StackName" },
+                  "         --resource GrafanaLaunchConfig ",
+                  "         --configsets Grafana ",
+                  "         --region ",
+                  { "Ref": "AWS::Region" },
+                  "\n",
+  
+                  "/opt/aws/bin/cfn-signal -s true ",
+                  "         --stack ",
+                  { "Ref": "AWS::StackName" },
+                  "         --resource GrafanaGroup",
+                  "         --region ",
+                  { "Ref": "AWS::Region" },
+                  "\n"
+                ]
+              ]
+            }
+          },
+          "IamInstanceProfile": { "Ref": "GrafanaInstanceProfile" }
+        }
+      },
+      "GrafanaGroup": {
+        "Type": "AWS::AutoScaling::AutoScalingGroup",
+        "Properties": {
+          "VPCZoneIdentifier": {
+            "Fn::FindInMap": [
+              "VPCSubnets",
+              { "Ref": "AWS::Region" },
+              { "Ref": "Environment" }
+            ]
+          },
+          "LaunchConfigurationName": {"Ref":"GrafanaLaunchConfig"},
+          "MinSize": {
+            "Fn::FindInMap": ["GlobalMap", "ASGMinSize", { "Ref": "Environment" }]
+          },
+          "MaxSize": {
+            "Fn::FindInMap": ["GlobalMap", "ASGMaxSize", { "Ref": "Environment" }]
+          },
+          "HealthCheckGracePeriod": 600,
+          "TargetGroupARNs": [{"Ref": "GrafanaTargetGroup"}],
+          "Tags": [
+            {
+              "Key": "Name",
+              "Value": {
+                "Fn::Join": ["", ["Grafana - (", { "Ref": "Environment" }, ")"]]
+              },
+              "PropagateAtLaunch": true
+            },
+            {
+              "Key": "Environment",
+              "Value": { "Ref": "Environment" },
+              "PropagateAtLaunch": true
+            },
+            {
+              "Key": "Department",
+              "Value": "DevOps",
+              "PropagateAtLaunch": true
+            },
+            {
+              "Key": "Owner",
+              "Value": "DevOps",
+              "PropagateAtLaunch": true
+            },
+            {
+              "Key": "Application",
+              "Value": "Grafana",
+              "PropagateAtLaunch": true
+            },
+            {
+              "Key": "Service",
+              "Value": "Monitoring",
+              "PropagateAtLaunch": true
+            }
+          ],
+          "TerminationPolicies": ["OldestInstance", "OldestLaunchConfiguration"]
+        },
+        "UpdatePolicy": {
+          "AutoScalingRollingUpdate": {
+            "MinInstancesInService": 1,
+            "MaxBatchSize": 1
+          }
+        },
+        "CreationPolicy": {
+          "ResourceSignal": {
+            "Count": {
+              "Fn::FindInMap": [
+                "GlobalMap",
+                "ASGMinSize",
+                { "Ref": "Environment" }
+              ]
+            },
+            "Timeout": "PT20M"
+          }
+        }
+      },
+      "GrafanaTargetGroup": {
+        "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+        "Properties": {
+          "HealthCheckPath": "/",
+          "HealthCheckPort": "80",
+          "Port": 80,
+          "Protocol": "HTTP",
+          "Matcher": { "HttpCode": "200,404" },
+          "HealthCheckIntervalSeconds": 30,
+          "HealthCheckTimeoutSeconds": 5,
+          "HealthyThresholdCount": 3,
+          "UnhealthyThresholdCount": 5,
+          "TargetGroupAttributes": [
+            { "Key": "deregistration_delay.timeout_seconds", "Value": "0" }
+          ],
+          "VpcId": {
+            "Fn::FindInMap": ["VPCmap", { "Ref": "AWS::Region" }, "vpc"]
+          }
+        }
+      },  
+      "InfluxSecurityGroup" : {
+        "Type" : "AWS::EC2::SecurityGroup",
+        "Properties" : {
+          "GroupDescription" : "Allow ports to Influx",
+          "VpcId" : {"Fn::FindInMap": ["VPCmap",
+            { "Ref" : "AWS::Region" },"vpc"]},
+            "SecurityGroupIngress": [
+                {
+                  "IpProtocol": "-1",
+                  "FromPort": "-1",
+                  "ToPort": "-1",
+                  "SourceSecurityGroupId": "sg"
+                },
+                {
+                  "IpProtocol": "-1",
+                  "FromPort": "-1",
+                  "ToPort": "-1",
+                  "SourceSecurityGroupId": "sg"
+                }
+              ],
+              "Tags": [
+                {"Key": "Name","Value": "Influx-SG-production"},
+                { "Key": "Environment", "Value": { "Ref": "Environment" } },
+                { "Key": "Service", "Value": "Influx" },
+                { "Key": "Department", "Value": "DevOps" },
+                { "Key": "Owner", "Value": "DevOps" },
+                { "Key": "Application", "Value": "Monitoring" }
+              ]
+            }
+      },
+      "InfluxRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": ["ec2.amazonaws.com"]
+                },
+                "Action": ["sts:AssumeRole"]
+              }
+            ]
+          },
+          "Policies": [
+            {
+              "PolicyName": "root",
+              "PolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                        "logs:*",
+                        "ec2:*",
+                        "s3:*",
+                        "ecr:*",
+                        "cloudwatch:*",
+                        "lambda:CreateFunction",
+                        "lambda:ListFunctions",
+                        "lambda:DeleteFunction",
+                        "autoscaling:*",
+                        "ecs:*",
+                        "apigateway:*"
+                    ],
+                    "Resource": ["*"]
+                  }
+                ]
+              }
+            }
+          ],
+          "Tags": [
+            {"Key": "Name","Value": "Grafana-Role-production"},
+            { "Key": "Environment", "Value": { "Ref": "Environment" } },
+            { "Key": "Service", "Value": "Grafana" },
+            { "Key": "Department", "Value": "DevOps" },
+            { "Key": "Owner", "Value": "DevOps" },
+            { "Key": "Application", "Value": "Monitoring" }
+          ]
+        }
+      },
+      "InfluxInstanceProfile": {
+        "Type": "AWS::IAM::InstanceProfile",
+        "Properties": {
+          "Roles": [{ "Ref": "InfluxRole" }]
+        }
+      },
+      "InfluxLaunchConfig": {
+        "Type": "AWS::AutoScaling::LaunchConfiguration",
+        "Metadata": {
+          "Comment": "Install and configure Influx",
+          "AWS::CloudFormation::Init": {
+            "configSets": {
+              "Influx": [
+                "preConfig",
+                "configFiles",
+                "preInstall"
+              ]
+            },
+            "preConfig": {
+              "commands": {
+                "01_createmountpoint": {
+                  "command": " mkfs -t xfs /dev/xvdb && mkdir -p /media/data"
+                },
+                "02_formatandmountextravolumen": {
+                  "command": "echo 'Already mounted' && sudo mount /dev/xvdb /media/data"
+                },
+                "03_makeitpersistent": {
+                  "command": "echo '/dev/xvdb      /media/data xfs    defaults,nofail 0   2' >> /etc/fstab"
+                },
+                "04_create_folders_nginx": {
+                  "command": "sudo mkdir /etc/nginx && sudo touch /etc/nginx/nginx.conf"
+                },
+                "05_create_folders_influx": {
+                  "command": "sudo mkdir /opt/influxdb/ && sudo touch /opt/influxdb/influxdb.conf && sudo mkdir /media/data/influxdb-1.8.6 && sudo mkdir /media/data/influxdb-1.8.6/data && sudo chmod -R 777 /media/data/ && sudo chmod -R 777 /opt/influxdb/"
+                },
+                "06_nginx_config_file": {
+                  "command": "aws s3 cp s3://devops-409396115112/config/grafana-influx/ngnix.conf /etc/nginx/nginx.conf && sudo chmod -R 777 /etc/nginx/"
+                }
+              }    
+            },
+            "configFiles": {
+              "files": {
+                "/opt/influxdb/influxdb.conf": {
+                  "content":{
+                    "Fn::Join":[
+                      "",
+                      [
+                        "reporting-disabled = false\n",
+                        "bind-address = '127.0.0.1:8088'\n",
+
+                        "[meta]\n",
+                          "dir = '/var/lib/influxdb/meta'\n",
+                          "retention-autocreate = true\n",
+                          "logging-enabled = true\n",
+
+                        "[data]\n",
+                          "dir = '/var/lib/influxdb/db'\n",
+                          "index-version = 'tsi1'\n",
+                          "wal-dir = '/var/lib/influxdb/wal'\n",
+                          "wal-fsync-delay = '0s'\n",
+                          "validate-keys = false\n",
+                          "query-log-enabled = false\n",
+                          "cache-max-memory-size = 2073741824\n",
+                          "cache-snapshot-memory-size = 26214400\n",
+                          "cache-snapshot-write-cold-duration = '10m0s'\n",
+                          "compact-full-write-cold-duration = '4h0m0s'\n",
+                          "compact-throughput = 50331648\n",
+                          "compact-throughput-burst = 50331648\n",
+                          "max-series-per-database = 20000000\n",
+                          "max-values-per-tag = 100000\n",
+                          "max-concurrent-compactions = 0\n",
+                          "max-index-log-file-size = 1048576\n",
+                          "series-id-set-cache-size = 100\n",
+                          "series-file-max-concurrent-snapshot-compactions = 0\n",
+                          "trace-logging-enabled = false\n",
+                          "tsm-use-madv-willneed = false\n",
+
+                        "[coordinator]\n",
+                          "write-timeout = '10s'\n",
+                          "max-concurrent-queries = 0\n",
+                          "query-timeout = '0s'\n",
+                          "log-queries-after = '3s'\n",
+                          "max-select-point = 0\n",
+                          "max-select-series = 0\n",
+                          "max-select-buckets = 0\n",
+
+                        "[retention]\n",
+                          "enabled = true\n",
+                          "check-interval = '30m0s'\n",
+
+                        "[shard-precreation]\n",
+                          "enabled = true\n",
+                          "check-interval = '10m0s'\n",
+                          "advance-period = '30m0s'\n",
+
+                        "[monitor]\n",
+                          "store-enabled = true\n",
+                          "store-database = '_internal'\n",
+                          "store-interval = '10s'\n",
+                        "[subscriber]\n",
+                          "enabled = true\n",
+                          "http-timeout = '30s'\n",
+                          "insecure-skip-verify = false\n",
+                          "ca-certs = ''\n",
+                          "write-concurrency = 40\n",
+                          "write-buffer-size = 1000\n",
+
+                        "[http]\n",
+                          "enabled = true\n",
+                          "bind-address = ':8086'\n",
+                          "auth-enabled = false\n",
+                          "log-enabled = false\n",
+                          "suppress-write-log = false\n",
+                          "write-tracing = false\n",
+                          "flux-enabled = false\n",
+                          "flux-log-enabled = false\n",
+                          "pprof-enabled = true\n",
+                          "pprof-auth-enabled = false\n",
+                          "debug-pprof-enabled = false\n",
+                          "ping-auth-enabled = false\n",
+                          "prom-read-auth-enabled = false\n",
+                          "https-enabled = false\n",
+                          "https-certificate = '/etc/ssl/influxdb.pem'\n",
+                          "https-private-key = ''\n",
+                          "max-row-limit = 0\n",
+                          "max-connection-limit = 0\n",
+                          "shared-secret = ''\n",
+                          "realm = 'InfluxDB'\n",
+                          "unix-socket-enabled = false\n",
+                          "unix-socket-permissions = '0777'\n",
+                          "bind-socket = '/var/run/influxdb.sock'\n",
+                          "max-body-size = 25000000\n",
+                          "access-log-path = ''\n",
+                          "max-concurrent-write-limit = 0\n",
+                          "max-enqueued-write-limit = 0\n",
+                          "enqueued-write-timeout = 30000000000\n",
+                        "[logging]\n",
+                          "format = 'auto'\n",
+                          "level = 'info'\n",
+                          "suppress-logo = false\n",
+
+                        "[[graphite]]\n",
+                          "enabled = false\n",
+                          "bind-address = ':2003'\n",
+                          "database = 'graphite'\n",
+                          "retention-policy = ''\n",
+                          "protocol = 'tcp'\n",
+                          "batch-size = 5000\n",
+                          "batch-pending = 10\n",
+                          "batch-timeout = '1s'\n",
+                          "consistency-level = 'one'\n",
+                          "separator = '.'\n",
+                          "udp-read-buffer = 0\n",
+
+                        "[[collectd]]\n",
+                          "enabled = false\n",
+                          "bind-address = ':25826'\n",
+                          "database = 'collectd'\n",
+                          "retention-policy = ''\n",
+                          "batch-size = 5000\n",
+                          "batch-pending = 10\n",
+                          "batch-timeout = '10s'\n",
+                          "read-buffer = 0\n",
+                          "typesdb = '/usr/share/collectd/types.db'\n",
+                          "security-level = 'none'\n",
+                          "auth-file = '/etc/collectd/auth_file'\n",
+                          "parse-multivalue-plugin = 'split'\n",
+
+                        "[[opentsdb]]\n",
+                          "enabled = false\n",
+                          "bind-address = ':4242'\n",
+                          "database = 'opentsdb'\n",
+                          "retention-policy = ''\n",
+                          "consistency-level = 'one'\n",
+                          "tls-enabled = false\n",
+                          "certificate = '/etc/ssl/influxdb.pem'\n",
+                          "batch-size = 1000\n",
+                          "batch-pending = 5\n",
+                          "batch-timeout = '1s'\n",
+                          "log-point-errors = true\n",
+                        "[[udp]]\n",
+                          "enabled = false\n",
+                          "bind-address = ':8089'\n",
+                          "database = 'udp'\n",
+                          "retention-policy = ''\n",
+                          "batch-size = 5000\n",
+                          "batch-pending = 10\n",
+                          "read-buffer = 0\n",
+                          "batch-timeout = '1s'\n",
+                          "precision = ''\n",
+
+                        "[continuous_queries]\n",
+                          "log-enabled = true\n",
+                          "enabled = true\n",
+                          "query-stats-enabled = false\n",
+                          "run-interval = '1s'\n",
+
+                        "[tls]\n",
+                          "min-version = ''\n",
+                          "max-version = ''"
+                      ]
+                    ]
+                  },
+                  "mode": "000777",
+                  "owner": "root",
+                  "group": "root"
+                },
+                "/sbin/startinflux":{
+                  "content": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "#!/bin/bash\n",
+                        "sudo docker run  -d -p 8083:8083 -p 8086:8086 -v /opt/influxdb/influxdb.conf:/etc/influxdb/influxdb.conf -v /media/data/influxdb-1.8.6/data/:/var/lib/influxdb influxdb:1.8.6"
+                      ]
+                    ]
+                  },
+                  "mode": "000755",
+                  "owner": "root",
+                  "group": "root"
+                },
+                "/sbin/startnginx":{
+                  "content": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "#!/bin/bash\n",
+                        "sudo docker run --name some-nginx -d -p 80:80 -v /etc/nginx/nginx.conf:/etc/nginx/nginx.conf:ro nginx"
+                      ]
+                    ]
+                  },
+                  "mode": "000755",
+                  "owner": "root",
+                  "group": "root"
+                }
+              }
+            },
+            "preInstall": {
+              "commands": {
+                "01_update_instance": {
+                  "command": "yum update -y"
+                },
+                "02_download_and_install_docker": {
+                  "command": "sudo amazon-linux-extras install docker && sudo usermod -a -G docker ec2-user && sudo systemctl start docker"
+                },
+                "03_download_and_install_telegraf": {
+                  "command": "wget https://dl.influxdata.com/telegraf/releases/telegraf-1.18.3-1.x86_64.rpm && sudo yum localinstall telegraf-1.18.3-1.x86_64.rpm -y && sudo systemctl start telegraf" 
+                },
+                "04_start_nginx_container": {
+                    "command": "docker run --name some-nginx -d -p 80:80 -v /etc/nginx/nginx.conf:/etc/nginx/nginx.conf:ro nginx"
+                  },
+                "05_start_influx_container": {
+                  "command": "docker run  -d -p 8083:8083 -p 8086:8086 -v /opt/influxdb/influxdb.conf:/etc/influxdb/influxdb.conf -v /media/data/influxdb-1.8.6/data/:/var/lib/influxdb influxdb:1.8.6"
+                }
+              }
+            }
+          }
+        },
+        "Properties": {
+          "KeyName": { "Ref": "KeyName" },
+          "ImageId": {
+            "Fn::FindInMap": [
+              "InstanceAMI",
+              { "Ref": "AWS::Region" },
+              { "Ref": "Environment" }
+            ]
+          },
+          "SecurityGroups": [
+            {
+              "Fn::FindInMap": [
+                "SecurityGroups",
+                { "Ref": "AWS::Region" },
+                { "Ref": "Environment" }
+              ]
+            },
+             {"Ref" : "InfluxSecurityGroup"}
+          ],
+          "InstanceType": {
+            "Fn::FindInMap": ["GlobalMap", "InstTypeInflux", { "Ref": "Environment" }]
+          },
+          "UserData": {
+            "Fn::Base64": {
+              "Fn::Join": [
+                "",
+                [
+                  "#!/bin/bash -xe\n",
+                  "/opt/aws/bin/cfn-init -v ",
+                  "         --stack ",
+                  { "Ref": "AWS::StackName" },
+                  "         --resource InfluxLaunchConfig ",
+                  "         --configsets Influx ",
+                  "         --region ",
+                  { "Ref": "AWS::Region" },
+                  "\n",
+  
+                  "/opt/aws/bin/cfn-signal -s true ",
+                  "         --stack ",
+                  { "Ref": "AWS::StackName" },
+                  "         --resource InfluxGroup ",
+                  "         --region ",
+                  { "Ref": "AWS::Region" },
+                  "\n"
+                ]
+              ]
+            }
+          },
+          "BlockDeviceMappings": [
+            {
+              "DeviceName": "/dev/xvdb",
+              "Ebs": {
+              "VolumeSize": "100",
+              "VolumeType": "gp2",
+              "DeleteOnTermination": "false"  
+              }
+              }
+          ],
+          "IamInstanceProfile": { "Ref": "InfluxInstanceProfile" }
+        }
+      },
+      "InfluxGroup": {
+        "Type": "AWS::AutoScaling::AutoScalingGroup",
+        "Properties": {
+          "VPCZoneIdentifier": {
+            "Fn::FindInMap": [
+              "VPCSubnets",
+              { "Ref": "AWS::Region" },
+              { "Ref": "Environment" }
+            ]
+          },
+          "LaunchConfigurationName": {"Ref":"InfluxLaunchConfig"},
+          "MinSize": {
+            "Fn::FindInMap": ["GlobalMap", "ASGMinSize", { "Ref": "Environment" }]
+          },
+          "MaxSize": {
+            "Fn::FindInMap": ["GlobalMap", "ASGMaxSize", { "Ref": "Environment" }]
+          },
+          "HealthCheckGracePeriod": 600,
+          "TargetGroupARNs": [{"Ref": "InfluxTargetGroup"}],
+          "Tags": [
+            {
+              "Key": "Name",
+              "Value": {
+                "Fn::Join": ["", ["Influx - (", { "Ref": "Environment" }, ")"]]
+              },
+              "PropagateAtLaunch": true
+            },
+            {
+              "Key": "Environment",
+              "Value": { "Ref": "Environment" },
+              "PropagateAtLaunch": true
+            },
+            {
+              "Key": "Department",
+              "Value": "DevOps",
+              "PropagateAtLaunch": true
+            },
+            {
+              "Key": "Owner",
+              "Value": "DevOps",
+              "PropagateAtLaunch": true
+            },
+            {
+              "Key": "Application",
+              "Value": "Influx",
+              "PropagateAtLaunch": true
+            },
+            {
+              "Key": "Service",
+              "Value": "Monitoring",
+              "PropagateAtLaunch": true
+            }
+          ],
+          "TerminationPolicies": ["OldestInstance", "OldestLaunchConfiguration"]
+        },
+        "UpdatePolicy": {
+          "AutoScalingRollingUpdate": {
+            "MinInstancesInService": 1,
+            "MaxBatchSize": 1
+          }
+        },
+        "CreationPolicy": {
+          "ResourceSignal": {
+            "Count": {
+              "Fn::FindInMap": [
+                "GlobalMap",
+                "ASGMinSize",
+                { "Ref": "Environment" }
+              ]
+            },
+            "Timeout": "PT20M"
+          }
+        }
+      },
+      "InfluxTargetGroup": {
+        "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+        "Properties": {
+          "HealthCheckPath": "/",
+          "HealthCheckPort": "80",
+          "Port": 80,
+          "Protocol": "HTTP",
+          "Matcher": { "HttpCode": "200,404" },
+          "HealthCheckIntervalSeconds": 30,
+          "HealthCheckTimeoutSeconds": 5,
+          "HealthyThresholdCount": 3,
+          "UnhealthyThresholdCount": 5,
+          "TargetGroupAttributes": [
+            { "Key": "deregistration_delay.timeout_seconds", "Value": "0" }
+          ],
+          "VpcId": {
+            "Fn::FindInMap": ["VPCmap", { "Ref": "AWS::Region" }, "vpc"]
+          }
+        }
+      }
+  }
+}

@@ -1,0 +1,389 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+
+  "Description": "CloudFormation template for Jenkins service",
+
+  "Parameters": {
+    "KeyName": {
+      "Description": "Name of an existing EC2 KeyPair to enable access to the instance",
+      "Type": "AWS::EC2::KeyPair::KeyName",
+      "Default": "env-prod",
+      "ConstraintDescription": "must be the name of an existing EC2 KeyPair."
+    },
+    "Environment": {
+      "Description": "Name of environment to deploy to",
+      "Type": "String",
+      "Default": "production",
+      "AllowedValues": ["production"]
+    },
+    "Domain": {
+      "Description": "Domain this stack belongs to",
+      "Type": "String",
+      "Default": "env"
+    }
+  },
+  "Mappings": {
+    "GlobalMap": {
+      "InstTypeJenkins": {
+        "production": "t3a.medium"
+      },
+      "ASGMinSize": {
+        "production": "1"
+      },
+      "ASGMaxSize": {
+        "production": "1"
+      },
+      "MinimumHealthy": {
+        "production": "100"
+      }
+    },
+    "InstanceAMI": {
+      "us-east-1": {
+        "production": "AMI"
+      }
+    },
+    "SecurityGroups": {
+      "us-east-1": {
+        "production":  "sg"
+      }
+    },
+    "VPCSubnets": {
+      "us-east-1": {
+        "production": [
+          "subnet",
+          "subnet-2"
+        ]
+      }
+    },
+    "VPCmap":{
+      "us-east-1" : {"vpc":"vpc"}
+    }
+  },
+  "Conditions": {
+    "InProduction": { "Fn::Equals": [{ "Ref": "Environment" }, "production"] }
+  },
+  "Resources": {
+    "JenkinsSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Allow ports to Jenkins",
+        "VpcId" : {"Fn::FindInMap": ["VPCmap",
+          { "Ref" : "AWS::Region" },"vpc"]},
+          "SecurityGroupIngress": [
+            {
+              "IpProtocol": "-1",
+              "FromPort": "-1",
+              "ToPort": "-1",
+              "SourceSecurityGroupId": "sg"
+            },
+            {
+              "IpProtocol": "-1",
+              "FromPort": "-1",
+              "ToPort": "-1",
+              "SourceSecurityGroupId": "sg"
+            }
+            ],
+            "Tags": [
+              {"Key": "Name","Value": "Jenkins-SG-production"},
+              { "Key": "Environment", "Value": { "Ref": "Environment" } },
+              { "Key": "Service", "Value": "CI/CD" },
+              { "Key": "Department", "Value": "DevOps" },
+              { "Key": "Owner", "Value": "DevOps" },
+              { "Key": "Application", "Value": "Jenkins" }
+            ]
+          }
+    },
+    "JenkinsRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["ec2.amazonaws.com"]
+              },
+              "Action": ["sts:AssumeRole"]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "root",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:*",
+                    "ec2:*",
+                    "s3:*",
+                    "ecr:*",
+                    "cloudwatch:*",
+                    "lambda:CreateFunction",
+                    "lambda:ListFunctions",
+                    "lambda:DeleteFunction",
+                    "autoscaling:*",
+                    "ecs:*",
+                    "apigateway:*"
+                  ],
+                  "Resource": ["*"]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {"Key": "Name","Value": "Jenkins-Role-production"},
+          { "Key": "Environment", "Value": { "Ref": "Environment" } },
+          { "Key": "Service", "Value": "Jenkins" },
+          { "Key": "Department", "Value": "DevOps" },
+          { "Key": "Owner", "Value": "DevOps" },
+          { "Key": "Application", "Value": "CI/CD" }
+        ]
+      }
+    },
+    "JenkinsInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Roles": [{ "Ref": "JenkinsRole" }]
+      }
+    },
+    "JenkinsLaunchConfig": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata": {
+        "Comment": "Install and configure Jenkins",
+        "AWS::CloudFormation::Init": {
+          "configSets": {
+            "Jenkins": [
+              "preConfig",
+              "configFiles",
+              "preInstall"
+            ]
+          },
+          "preConfig": {
+            "commands": {
+              "01_createmountpoint": {
+                "command": " mkfs -t xfs /dev/xvdb && mkdir -p /media/data"
+              },
+              "02_formatandmountextravolumen": {
+                "command": "echo 'Already mounted' && sudo mount /dev/xvdb /media/data"
+              },
+              "03_makeitpersistent": {
+                "command": "echo '/dev/xvdb      /media/data xfs    defaults,nofail 0   2' >> /etc/fstab"
+              },
+              "04_create_folders_jenkins": {
+                "command": "mkdir /media/data/jenkins/"
+              },
+              "05_permission_folder_jenkins": {
+                "command": "chmod -R 777 /media/data/jenkins/"
+              }
+            }    
+          },
+          "configFiles": {
+            "files": {
+              "/sbin/startjenkins":{
+                "content": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "#!/bin/bash\n",
+                      "cd /media/data/ && sudo /usr/local/bin/docker-compose up -d"
+                    ]
+                  ]
+                },
+                "mode": "000755",
+                "owner": "root",
+                "group": "root"
+              }
+            }
+          },
+          "preInstall": {
+            "commands": {
+              "01_update_instance": {
+                "command": "yum update -y"
+              },
+              "02_download_and_install_docker": {
+                "command": "sudo amazon-linux-extras install docker && sudo usermod -a -G docker ec2-user && sudo systemctl start docker"
+              },
+              "03_download_and_install_telegraf": {
+                "command": "wget https://dl.influxdata.com/telegraf/releases/telegraf-1.18.3-1.x86_64.rpm && sudo yum localinstall telegraf-1.18.3-1.x86_64.rpm -y && sudo systemctl start telegraf" 
+              },
+              "04_startdockerfile": {
+                "command": "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin AWS_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com" 
+              },
+              "05_downloadTelegrafFile": {
+                "command": "aws s3 cp s3://devops-AWS_ACCOUNT/config/telegraf/telegraf.conf.jenkins /etc/telegraf/telegraf.conf && systemctl restart telegraf"
+              },
+              "06_download_and_install_docker_compose": {
+                  "command": "sudo curl -L https://github.com/docker/compose/releases/download/1.22.0/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose && sudo chmod +x /usr/local/bin/docker-compose"
+                },
+              "07_copy_docker_compose_from_s3": {
+                "command": "aws s3 cp s3://devops-AWS_ACCOUNT/jenkins/docker-compose.yml /media/data/docker-compose.yml && chmod 777 /media/data/docker-compose.yml"
+              },
+              "10_start_kibana": {
+                "command": "cd /media/data/ && sudo /usr/local/bin/docker-compose up -d"
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "KeyName": { "Ref": "KeyName" },
+        "ImageId": {
+          "Fn::FindInMap": [
+            "InstanceAMI",
+            { "Ref": "AWS::Region" },
+            { "Ref": "Environment" }
+          ]
+        },
+        "SecurityGroups": [
+          {
+            "Fn::FindInMap": [
+              "SecurityGroups",
+              { "Ref": "AWS::Region" },
+              { "Ref": "Environment" }
+            ]
+          },
+           {"Ref" : "JenkinsSecurityGroup"}
+        ],
+        "InstanceType": {
+          "Fn::FindInMap": ["GlobalMap", "InstTypeJenkins", { "Ref": "Environment" }]
+        },
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash -xe\n",
+                "/opt/aws/bin/cfn-init -v ",
+                "         --stack ",
+                { "Ref": "AWS::StackName" },
+                "         --resource JenkinsLaunchConfig ",
+                "         --configsets Jenkins ",
+                "         --region ",
+                { "Ref": "AWS::Region" },
+                "\n",
+
+                "/opt/aws/bin/cfn-signal -s true ",
+                "         --stack ",
+                { "Ref": "AWS::StackName" },
+                "         --resource JenkinsGroup ",
+                "         --region ",
+                { "Ref": "AWS::Region" },
+                "\n"
+              ]
+            ]
+          }
+        },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/xvdb",
+            "Ebs": {
+            "VolumeSize": "60",
+            "VolumeType": "gp2"
+            }
+            }
+        ],
+        "IamInstanceProfile": { "Ref": "JenkinsInstanceProfile" }
+      }
+    },
+    "JenkinsGroup": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "VPCZoneIdentifier": {
+          "Fn::FindInMap": [
+            "VPCSubnets",
+            { "Ref": "AWS::Region" },
+            { "Ref": "Environment" }
+          ]
+        },
+        "LaunchConfigurationName": {"Ref":"JenkinsLaunchConfig"},
+        "MinSize": {
+          "Fn::FindInMap": ["GlobalMap", "ASGMinSize", { "Ref": "Environment" }]
+        },
+        "MaxSize": {
+          "Fn::FindInMap": ["GlobalMap", "ASGMaxSize", { "Ref": "Environment" }]
+        },
+        "HealthCheckGracePeriod": 600,
+        "TargetGroupARNs": [{"Ref": "JenkinsTargetGroup"}],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": ["", ["Jenkins - (", { "Ref": "Environment" }, ")"]]
+            },
+            "PropagateAtLaunch": true
+          },
+          {
+            "Key": "Environment",
+            "Value": { "Ref": "Environment" },
+            "PropagateAtLaunch": true
+          },
+          {
+            "Key": "Department",
+            "Value": "DevOps",
+            "PropagateAtLaunch": true
+          },
+          {
+            "Key": "Owner",
+            "Value": "DevOps",
+            "PropagateAtLaunch": true
+          },
+          {
+            "Key": "Application",
+            "Value": "Jenkins",
+            "PropagateAtLaunch": true
+          },
+          {
+            "Key": "Service",
+            "Value": "CI/CD",
+            "PropagateAtLaunch": true
+          }
+        ],
+        "TerminationPolicies": ["OldestInstance", "OldestLaunchConfiguration"]
+      },
+      "UpdatePolicy": {
+        "AutoScalingRollingUpdate": {
+          "MinInstancesInService": 1,
+          "MaxBatchSize": 1
+        }
+      },
+      "CreationPolicy": {
+        "ResourceSignal": {
+          "Count": {
+            "Fn::FindInMap": [
+              "GlobalMap",
+              "ASGMinSize",
+              { "Ref": "Environment" }
+            ]
+          },
+          "Timeout": "PT20M"
+        }
+      }
+    },
+    "JenkinsTargetGroup": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "HealthCheckPath": "/",
+        "HealthCheckPort": "80",
+        "Port": 80,
+        "Protocol": "HTTP",
+        "Matcher": { "HttpCode": "200,404" },
+        "HealthCheckIntervalSeconds": 30,
+        "HealthCheckTimeoutSeconds": 5,
+        "HealthyThresholdCount": 3,
+        "UnhealthyThresholdCount": 5,
+        "TargetGroupAttributes": [
+          { "Key": "deregistration_delay.timeout_seconds", "Value": "0" }
+        ],
+        "VpcId": {
+          "Fn::FindInMap": ["VPCmap", { "Ref": "AWS::Region" }, "vpc"]
+        }
+      }
+    }
+  }
+
+}

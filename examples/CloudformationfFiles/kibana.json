@@ -1,0 +1,387 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+
+  "Description": "CloudFormation template for Kibana service",
+
+  "Parameters": {
+    "KeyName": {
+      "Description": "Name of an existing EC2 KeyPair to enable access to the instance",
+      "Type": "AWS::EC2::KeyPair::KeyName",
+      "Default": "env-prod",
+      "ConstraintDescription": "must be the name of an existing EC2 KeyPair."
+    },
+    "Environment": {
+      "Description": "Name of environment to deploy to",
+      "Type": "String",
+      "Default": "production",
+      "AllowedValues": ["production"]
+    },
+    "Domain": {
+      "Description": "Domain this stack belongs to",
+      "Type": "String",
+      "Default": "env"
+    }
+  },
+  "Mappings": {
+    "GlobalMap": {
+      "InstType": {
+        "production": "t3a.medium"
+      },
+      "InstTypeKibana": {
+        "production": "t3a.medium"
+      },
+      "ASGMinSize": {
+        "production": "1"
+      },
+      "ASGMaxSize": {
+        "production": "1"
+      },
+      "MinimumHealthy": {
+        "production": "100"
+      }
+    },
+    "InstanceAMI": {
+      "us-east-1": {
+        "production": "AMI"
+      }
+    },
+    "SecurityGroups": {
+      "us-east-1": {
+        "production":  "SG"
+      }
+    },
+    "VPCSubnets": {
+      "us-east-1": {
+        "production": [
+          "SUBNET",
+          "SUBNET"
+        ]
+      }
+    },
+    "VPCmap":{
+      "us-east-1" : {"vpc":"VPC"}
+    }
+  },
+  "Conditions": {
+    "InProduction": { "Fn::Equals": [{ "Ref": "Environment" }, "production"] }
+  },
+  "Resources": {
+    "KibanaSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Allow ports to Kibana",
+        "VpcId" : {"Fn::FindInMap": ["VPCmap",
+          { "Ref" : "AWS::Region" },"vpc"]},
+          "SecurityGroupIngress": [
+              {
+                "IpProtocol": "-1",
+                "FromPort": "-1",
+                "ToPort": "-1",
+                "SourceSecurityGroupId": "SG"
+              },
+              {
+                "IpProtocol": "-1",
+                "FromPort": "-1",
+                "ToPort": "-1",
+                "SourceSecurityGroupId": "sg"
+              }
+            ],
+            "Tags": [
+              {"Key": "Name","Value": "Kibana-SG-production"},
+              { "Key": "Environment", "Value": { "Ref": "Environment" } },
+              { "Key": "Service", "Value": "Kibana" },
+              { "Key": "Department", "Value": "DevOps" },
+              { "Key": "Owner", "Value": "DevOps" },
+              { "Key": "Application", "Value": "Monitoring" }
+            ]
+          }
+    },
+    "KibanaRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["ec2.amazonaws.com"]
+              },
+              "Action": ["sts:AssumeRole"]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "root",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                      "s3:*"
+                  ],
+                  "Resource": ["*"]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {"Key": "Name","Value": "Grafana-Role-production"},
+          { "Key": "Environment", "Value": { "Ref": "Environment" } },
+          { "Key": "Service", "Value": "Kibana" },
+          { "Key": "Department", "Value": "DevOps" },
+          { "Key": "Owner", "Value": "DevOps" },
+          { "Key": "Application", "Value": "Monitoring" }
+        ]
+      }
+    },
+    "KibanaInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Roles": [{ "Ref": "KibanaRole" }]
+      }
+    },
+    "KibanaLaunchConfig": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata": {
+        "Comment": "Install and configure Kibana",
+        "AWS::CloudFormation::Init": {
+          "configSets": {
+            "Kibana": [
+              "preConfig",
+              "configFiles",
+              "preInstall"
+            ]
+          },
+          "preConfig": {
+            "commands": {
+              "01_createmountpoint": {
+                "command": " mkfs -t xfs /dev/xvdb && mkdir -p /media/data"
+              },
+              "02_formatandmountextravolumen": {
+                "command": "echo 'Already mounted' && sudo mount /dev/xvdb /media/data"
+              },
+              "03_makeitpersistent": {
+                "command": "echo '/dev/xvdb      /media/data xfs    defaults,nofail 0   2' >> /etc/fstab"
+              },
+              "04_create_folders_elasticsearch": {
+                "command": "mkdir /media/data/elasticsearch/"
+              },
+              "05_create_folders_nginx": {
+                "command": "mkdir /media/data/nginx/ && touch /media/data/nginx/nginx.conf && chmod -R 777 /media/data/nginx"
+              },
+              "06_create_folders_elasticsearch_data": {
+                "command": "mkdir /media/data/elasticsearch/data && mkdir /media/data/elasticsearch/fluentd && mkdir /media/data/elasticsearch/fluentd/conf && chmod -R 777 /media/data/elasticsearch/"
+              }
+            }    
+          },
+          "configFiles": {
+            "files": {
+              "/sbin/startkibana":{
+                "content": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "#!/bin/bash\n",
+                      "cd /media/data/elasticsearch/ && sudo docker-compose up -d"
+                    ]
+                  ]
+                },
+                "mode": "000755",
+                "owner": "root",
+                "group": "root"
+              }
+            }
+          },
+          "preInstall": {
+            "commands": {
+              "01_update_instance": {
+                "command": "yum update -y"
+              },
+              "02_download_and_install_docker": {
+                "command": "sudo amazon-linux-extras install docker && sudo usermod -a -G docker ec2-user && sudo systemctl start docker"
+              },
+              "03_download_and_install_telegraf": {
+                "command": "wget https://dl.influxdata.com/telegraf/releases/telegraf-1.18.3-1.x86_64.rpm && sudo yum localinstall telegraf-1.18.3-1.x86_64.rpm -y && sudo systemctl start telegraf" 
+              },
+              "04_download_and_install_docker_compose": {
+                  "command": "sudo curl -L https://github.com/docker/compose/releases/download/1.22.0/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose && sudo chmod +x /usr/local/bin/docker-compose"
+                },
+              "05_copy_docker_compose_from_s3": {
+                "command": "aws s3 cp s3://devops-AWS_ACCOUNT/config/Kibana/docker-compose.yml /media/data/elasticsearch/docker-compose.yml && chmod 777 /media/data/elasticsearch/docker-compose.yml "
+              },
+              "06_copy_fluentd_conf_from_s3": {
+                "command": "aws s3 cp s3://devops-AWS_ACCOUNT/config/Kibana/fluent.conf /media/data/elasticsearch/fluentd/conf && chmod 777 /media/data/elasticsearch/fluentd/conf/fluent.conf "
+              },
+              "07_copy_dockerfile_from_s3": {
+                "command": "aws s3 cp s3://devops-AWS_ACCOUNT/config/Kibana/Dockerfile /media/data/elasticsearch/fluentd/Dockerfile && chmod 777 /media/data/elasticsearch/fluentd/Dockerfile"
+              },
+              "08_copy_nginx_conf_s3": {
+                "command": "aws s3 cp s3://devops-AWS_ACCOUNT/config/Kibana/nginx.conf /media/data/nginx/nginx.conf && chmod 777 /media/data/nginx/nginx.conf"
+              },
+              "09_start_kibana": {
+                "command": "cd /media/data/elasticsearch/ && sudo /usr/local/bin/docker-compose up -d"
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "KeyName": { "Ref": "KeyName" },
+        "ImageId": {
+          "Fn::FindInMap": [
+            "InstanceAMI",
+            { "Ref": "AWS::Region" },
+            { "Ref": "Environment" }
+          ]
+        },
+        "SecurityGroups": [
+          {
+            "Fn::FindInMap": [
+              "SecurityGroups",
+              { "Ref": "AWS::Region" },
+              { "Ref": "Environment" }
+            ]
+          },
+           {"Ref" : "KibanaSecurityGroup"}
+        ],
+        "InstanceType": {
+          "Fn::FindInMap": ["GlobalMap", "InstTypeKibana", { "Ref": "Environment" }]
+        },
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash -xe\n",
+                "/opt/aws/bin/cfn-init -v ",
+                "         --stack ",
+                { "Ref": "AWS::StackName" },
+                "         --resource KibanaLaunchConfig ",
+                "         --configsets Kibana ",
+                "         --region ",
+                { "Ref": "AWS::Region" },
+                "\n",
+
+                "/opt/aws/bin/cfn-signal -s true ",
+                "         --stack ",
+                { "Ref": "AWS::StackName" },
+                "         --resource KibanaGroup ",
+                "         --region ",
+                { "Ref": "AWS::Region" },
+                "\n"
+              ]
+            ]
+          }
+        },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/xvdb",
+            "Ebs": {
+            "VolumeSize": "200",
+            "VolumeType": "gp2"
+            }
+            }
+        ],
+        "IamInstanceProfile": { "Ref": "KibanaInstanceProfile" }
+      }
+    },
+    "KibanaGroup": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "VPCZoneIdentifier": {
+          "Fn::FindInMap": [
+            "VPCSubnets",
+            { "Ref": "AWS::Region" },
+            { "Ref": "Environment" }
+          ]
+        },
+        "LaunchConfigurationName": {"Ref":"KibanaLaunchConfig"},
+        "MinSize": {
+          "Fn::FindInMap": ["GlobalMap", "ASGMinSize", { "Ref": "Environment" }]
+        },
+        "MaxSize": {
+          "Fn::FindInMap": ["GlobalMap", "ASGMaxSize", { "Ref": "Environment" }]
+        },
+        "HealthCheckGracePeriod": 600,
+        "TargetGroupARNs": [{"Ref": "KibanaTargetGroup"}],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": ["", ["Kibana - (", { "Ref": "Environment" }, ")"]]
+            },
+            "PropagateAtLaunch": true
+          },
+          {
+            "Key": "Environment",
+            "Value": { "Ref": "Environment" },
+            "PropagateAtLaunch": true
+          },
+          {
+            "Key": "Department",
+            "Value": "DevOps",
+            "PropagateAtLaunch": true
+          },
+          {
+            "Key": "Owner",
+            "Value": "DevOps",
+            "PropagateAtLaunch": true
+          },
+          {
+            "Key": "Application",
+            "Value": "Kibana",
+            "PropagateAtLaunch": true
+          },
+          {
+            "Key": "Service",
+            "Value": "Monitoring",
+            "PropagateAtLaunch": true
+          }
+        ],
+        "TerminationPolicies": ["OldestInstance", "OldestLaunchConfiguration"]
+      },
+      "UpdatePolicy": {
+        "AutoScalingRollingUpdate": {
+          "MinInstancesInService": 1,
+          "MaxBatchSize": 1
+        }
+      },
+      "CreationPolicy": {
+        "ResourceSignal": {
+          "Count": {
+            "Fn::FindInMap": [
+              "GlobalMap",
+              "ASGMinSize",
+              { "Ref": "Environment" }
+            ]
+          },
+          "Timeout": "PT20M"
+        }
+      }
+    },
+    "KibanaTargetGroup": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "HealthCheckPath": "/",
+        "HealthCheckPort": "80",
+        "Port": 80,
+        "Protocol": "HTTP",
+        "Matcher": { "HttpCode": "200,404" },
+        "HealthCheckIntervalSeconds": 30,
+        "HealthCheckTimeoutSeconds": 5,
+        "HealthyThresholdCount": 3,
+        "UnhealthyThresholdCount": 5,
+        "TargetGroupAttributes": [
+          { "Key": "deregistration_delay.timeout_seconds", "Value": "0" }
+        ],
+        "VpcId": {
+          "Fn::FindInMap": ["VPCmap", { "Ref": "AWS::Region" }, "vpc"]
+        }
+      }
+    }
+}
+}

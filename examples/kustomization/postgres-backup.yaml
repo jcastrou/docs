@@ -1,0 +1,42 @@
+apiVersion: batch/v1beta1
+kind: CronJob
+metadata:
+  name: postgres-backup
+spec:
+  schedule: "0 0 * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          containers:
+            - name: postgres-backup
+              image: postgres:13.1-alpine
+              volumeMounts:
+                - name: main
+                  mountPath: /backups/postgresql/
+                  subPath: "backups"
+              args:
+                - pg_dumpall
+                - "-f"
+                - "/backups/postgresql/postgresql-backup.sql"
+                - "-h"
+                - "postgresql"
+                - "-p"
+                - "5432"
+                - "-U"
+                - "postgres"
+              env:
+                - name: PGPASSWORD
+                  valueFrom: 
+                    secretKeyRef:
+                      name: postgresql
+                      key: postgresql-password
+          restartPolicy: OnFailure    
+          volumes:
+            - name: main
+              persistentVolumeClaim:
+                readOnly: false
+                claimName: main    
